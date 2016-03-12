@@ -1,0 +1,50 @@
+[[PageOutline]]
+= Installing & Using the LLVM Back-end =
+
+== Installing ==
+The LLVM backend is now included in GHC HEAD. Just grab the git HEAD version of GHC and build it. The backend now also supports all modes that GHC can be built in so you shouldn't need to change your build.mk file either.
+
+For instructions on building GHC go [http://hackage.haskell.org/trac/ghc/wiki/Building here]
+
+== LLVM Support ==
+
+The LLVM backend only supports LLVM version '''2.7''' or later. Problems with LLVM >= 2.9 and GHC 7.0.3 currently exist (see bug #5103). GHC 7.2 and later works fine with LLVM >= 2.9.
+
+Simply install GHC and make sure the various llvm tools (opt, llc) are available on your path.
+
+== Using ==
+
+Once built you can check that you have the LLVM backend GHC will support these extra options:
+
+  * ''-fllvm'' - Compile code using the llvm backend
+  * ''-pgmlo'' - The program to use as the llvm optimiser
+  * ''-pgmlc'' - The program to use as the llvm compiler
+  * ''-optlo'' - Extra options to pass to the llvm optimiser
+  * ''-optlc'' - Extra options to pass to the llvm compiler
+  * ''-ddump-llvm'' - Dumps the llvm IR while compiling
+  * ''-keep-llvm-files'' - Keep a copy of the llvm intermediate file around
+
+
+== Supported Platforms & Correctness ==
+
+ * Linux x86-32/x86-64: Currently well supported. The back-end can pass the test suite and build a working version of GHC (bootstrap test).
+ * Windows x86-32: Currently well supported. The back-end can pass the test suite and build a working version of GHC (bootstrap test).
+ * Mac OS X 10.5/10.6 (x86-32/x86-64): Currently well supported. The back-end can pass the test suite and bootstrap GHC. OS X has caused a lot more problems then Linux or Windows and does a few things slightly differently then them. It is quite stable these days though.
+ * ARM: Work is currently progressing to fully support GHC using the LLVM backend on ARM. You can see a blog with info about this [http://ghcarm.wordpress.com/ here].
+ * Other platforms haven't been tested at all.
+
+== Shared Libraries ==
+
+Shared libraries are supported on Linux x64 and Mac OSX x64. Other platforms aren't supported.
+
+== Performance ==
+
+(All done on linux/x86-32)
+
+A quick summary of the results are that for the 'nofib' benchmark suite, the LLVM code generator was 3.8% slower than the NCG (the C code generator was 6.9% slower than the NCG). The DPH project includes a benchmark suite which I (David Terei) also ran and for this type of code using the LLVM back-end shortened the runtime by an average of 25% compared to the NCG. Also, while not included in my thesis paper as I ran out of time, I did do some benchmarking with the 'nobench' benchmark suite. It gave performance ratios for the back-ends of around:
+
+||NCG || 1.11||
+||C || 1.05||
+||LLVM || 1.14||
+
+A nice demonstration of the improvements the LLVM back-end can bring to some code though can be see at http://donsbot.wordpress.com/2010/02/21/smoking-fast-haskell-code-using-ghcs-new-llvm-codegen/

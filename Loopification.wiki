@@ -1,0 +1,12 @@
+= Loopification =
+
+Loopification is a C-- optimisation pass that turns tail recursion into proper loops.
+
+Here is a summary of relevant links and tickets
+
+* [http://research.microsoft.com/en-us/um/people/simonpj/tmp/wos-diss-draft.pdf Krzysztof Wos's project] in which he reports great performance improvements by turning tail recursion into loops in C--. 
+
+* Tickets:
+  * #8285
+  * #8793, #11372; see comment 15 of #8793) etc, where it seems that we are missing loopification for a simple IO function
+  * #8585 concerned getting the loop to start ''after'' the stack check

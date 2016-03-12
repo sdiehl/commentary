@@ -1,0 +1,64 @@
+= Core-to-Core optimization pipeline
+
+After the source program has been [wiki:Commentary/Compiler/TypeChecker typechecked] it is desugared into GHC's intermediate language [wiki:Commentary/Compiler/CoreSynType Core]. The Core representation of a program is then optimized by a series of correctness preserving Core-to-Core passes. This page describes the overall structure of the Core-to-Core optimization pipeline. Detailed descriptions of optimizations are available [wiki:Commentary/Compiler/Core2CorePipeline#Furtherreading in the published papers]. An overview of the whole compiler pipeline is available [wiki:Commentary/Compiler/HscMain here].
+
+== Optimizations during desugaring
+
+At the end of desugaring we run the `simpleOptPgm` function that performs some simple optimizations: eliminating dead bindings, and inlining non-recursive bindings that are used only once or where the RHS is trivial. The rest of Core optimisations is performed by the Core-to-Core pipeline.
+
+== The pipeline
+
+The structure of the Core-to-Core pipeline is determined in the `getCoreToDo` function in the [[GhcFile(compiler/simplCore/SimplCore.lhs)]] module. Below is an ordered list of performed optimisations. These are enabled by default with `-O1` and `-O2` unless the description says a specific flag is required. The simplifier, which the pipeline description below often refers to, is described in detail in [wiki:Commentary/Compiler/Core2CorePipeline#Simplifier the next section].
+
+  * '''Static Argument Transformation''': tries to remove redundant arguments to recursive calls, turning them into free variables in those calls.  Only enabled with `-fstatic-argument-transformation`.  If run this pass is preceded with a "gentle" run of the simplifier.
+
+  * '''Vectorisation''': run the [wiki:DataParallel Data Parallel Haskell] [wiki:DataParallel/Vectorisation vectoriser]. Only enabled with `-fvectorise`. TODO: does `-Odph` imply `fvectorise`?
+
+  * '''Simplifier, gentle run'''
+
+  * '''Specialisation''': specialisation attempts to eliminate overloading. More details can be found in the comments in [[GhcFile(compiler/specialise/Specialise.lhs)]].
+
+  * '''Full laziness, 1st pass''': floats let-bindings outside of lambdas. This pass includes annotating bindings with level information and then running the float-out pass. In this first pass of the full laziness we don't float partial applications and bindings that contain free variables - this will be done by the second pass later in the pipeline. See "Further Reading" section below for pointers where to find the description of the full laziness algorithm.
+
+  * '''Float in, 1st pass''': the opposite of full laziness, this pass floats let-bindings as close to their use sites as possible. It will not undo the full laziness by sinking bindings inside a lambda, unless the lambda is one-shot. At this stage we have not yet run the demand analysis, so we only have demand information for things that we imported.
+
+  * '''Simplifier, main run''': run the main passes of the simplifier (phases 2, 1 and 0). Phase 0 is run with at least 3 iterations.
+
+  * '''Call arity''': attempts to eta-expand local functions based on how they are used. If run, this pass is followed by a 0 phase of the simplifier. See Notes in [[GhcFile(compiler/simplCore/CallArity.hs)]] and the relevant paper.
+
+  * '''Demand analysis, 1st pass''' (a.k.a. strictness analysis): runs the demand analyser followed by worker-wrapper transformation and 0 phase of the simplifier. This pass tries to determine if some expressions are certain to be used and whether they will be used once or many times (cardinality analysis). We currently don't have means of saying that a binding is certain to be used many times. We can only determine that it is certain to be one-shot (ie. used only once) or probable to be one shot. Demand analysis pass only annotates Core with strictness information. This information is later used by worker/wrapper pass to perform transformations. CPR analysis is also done during demand analysis.
+
+  * '''Full laziness, 2nd pass''': another full-laziness pass. This time partial applications and functions with free variables are floated out.
+
+  * '''Common Sub-expression-elimination''': eliminates expressions that are identical.
+
+  * '''Float in, 2nd pass'''
+
+  * '''Check rules, 1st pass''': this pass is not for optimisation but for troubleshooting the rules. It is only enabled with `-frule-check` flag that accepts a string pattern. This pass looks for rules beginning with that string pattern that could have fired but didn't and prints them to stdout.
+
+  * '''Liberate case''': unrolls recursive functions once in their own RHS, to avoid repeated case analysis of free variables. It's a bit like the call-pattern specialisation but for free variables rather than arguments. Followed by a phase 0 simplifier run. Only enabled with `-fliberate-case` flag.
+
+  * '''Call-pattern specialisation''': Only enabled with `-fspec-constr` flag. TODO: explain what it does.
+
+  * '''Check rules, 2nd pass'''
+
+  * '''Simplifier, final''': final 0 phase of the simplifier.
+
+  * '''Damand analysis, 2nd pass''' (a.k.a. late demand analysis): this pass consists of demand analysis followed by worker-wrapper transformation and phase 0 of the simplifier. The reason for this pass is that some opportunities for discovering strictness were not visible earlier; and optimisations like call-pattern specialisation can create functions with unused arguments which are eliminated by late demand analysis. Only run with `-flate-dmd-anal`. FIXME: but the cardinality paper says something else, namely that the late pass is meant to detect single entry thunks. Is it still the case in the current implementation?
+
+  * '''Check rules, 3rd pass'''
+
+The plugin mechanism allows to modify the above pipeline dynamically.
+
+== Simplifier
+
+Simplifier is the workhorse of the Core-to-Core optimisation pipeline. It performs all the local transformations: (TODO: this list is most likely not comprehensive)
+
+ - constant folding
+ - applying the rewrite rules
+ - inlining
+ - case of case
+ - case of known constructor
+ - eta expansion and eta reduction
+ - combining adjacent casts
+ - pushing a cast out of the way of an application e.g. 

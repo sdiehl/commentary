@@ -1,0 +1,64 @@
+
+[[PageOutline]]
+
+= The Scheduler =
+
+The scheduler is the heart of the runtime: it is the single part of
+the system through which all entry to the Haskell world goes, and it
+handles requests from outside to invoke Haskell functions (foreign
+export).
+
+In this part of the commentary we'll discuss the ''threaded'' version
+of the runtime (see [wiki:Commentary/Rts/Config]), that is, the
+version of the runtime that uses multiple OS threads, because it is by
+far the most complex beast.
+
+See also [http://blog.ezyang.com/2013/01/the-ghc-scheduler/ Edward Yang's blog post] (2013); some of the material there has been incorporated here.
+
+We begin by discussing the basic abstractions used in the scheduler.
+
+== OS Threads ==
+
+Source files: [[GhcFile(includes/rts/OSThreads.h)]],
+[[GhcFile(rts/win32/OSThreads.c)]], [[GhcFile(rts/posix/OSThreads.c)]]
+
+We assume that the OS provides some kind of native threads, and for
+SMP parallelism we assume that the OS will schedule multiple OS
+threads across the available CPUs.
+
+OS threads are only used by the runtime for two reasons:
+
+ * To support non-blocking foreign calls: a foreign call
+   should not block the other Haskell threads in the system from
+   running, and using OS threads is the only way to ensure that.
+
+ * To support SMP parallelism.
+
+Haskell threads are much lighter-weight (at least 100x) than OS threads.
+
+When running on an SMP, we begin by creating the number of OS threads specified by the `+RTS -N` option, although during the course of running the program more OS threads might be created in order to continue running Haskell code while foreign calls execute.  Spare OS threads are kept in a pool attached to each `Capability` (see [#Capabilities]).
+
+The RTS provides a platform-independent abstraction layer for OS
+threads in [[GhcFile(includes/rts/OSThreads.h)]].
+
+== Haskell threads ==
+
+A Haskell thread is represented by a Thread State Object
+([wiki:Commentary/Rts/Storage/HeapObjects#ThreadStateObjects TSO]). These objects are ''garbage-collected'', like other closures in Haskell.  The TSO, along with the stack allocated with it (STACK), constitute the primary memory overhead of a thread.  Default stack size, in particular, is controlled by the GC flag {{{-ki}}}, and is 1k by default (Actually, your usable stack will be a little smaller than that because this size also includes the size of the {{{StgTSO}}} struct, so that a lot of allocated threads will fit nicely into a single block.)  There are
+two kinds of Haskell thread:
+
+ * A ''bound'' thread is created as the result of a ''call-in'' from
+   outside Haskell; that is, a call to {{{foreign export}}} or
+   {{{foreign import "wrapper"}}}.  A bound thread is tied to the
+   OS thread that made the call; all further foreign calls made by
+   this Haskell thread are made in the same OS thread.  (this is part
+   of the design of the FFI, described in the paper 
+   [http://www.haskell.org/~simonmar/papers/conc-ffi.pdf Extending the Haskell Foreign Function Inteface with Concurrency]).
+
+ * An ''unbound'' thread is created by
+   {{{Control.Concurrent.forkIO}}}.  Foreign calls made by an unbound
+   thread are made by an arbitrary OS thread.
+
+Initialization of TSOs is handled in {{{createThread}}} in [[GhcFile(rts/Threads.c)]]; this function is in turn invoked by {{{createGenThread}}}, {{{createIOThread}}} and {{{createStrictIOThread}}} in [[GhcFile(rts/RtsAPI.c)]]. These functions setup the initial stack state, which controls what the thread executes when it actually gets run. These functions are the ones invoked by the {{{fork#}}} and other primops (recall entry-points for primops are located in [[GhcFile(rts/PrimOps.cmm)]]).
+
+Being garbage collected has two major implications for TSOs. First, TSOs are not GC roots, so they will get GC'd if there is nothing holding on to them (e.g. [http://blog.ezyang.com/2011/07/blockedindefinitelyonmvar in the case of deadlock]), and their space is not automatically reclaimed when they finish executing (so {{{ThreadId}}} can cause memory leaks}}}. Usually, a TSO will be retained by a Capability

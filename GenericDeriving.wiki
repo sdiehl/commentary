@@ -1,0 +1,469 @@
+= Support for generic programming =
+[[PageOutline]]
+
+GHC includes a new (in 2010) mechanism to let you write generic functions.  It is described in paper [http://www.dreixel.net/research/pdf/gdmh_nocolor.pdf A generic deriving mechanism for Haskell]. This page sketches the specifics of the implementation; we assume you have read the paper. The [http://www.haskell.org/haskellwiki/Generics HaskellWiki page] gives a more general overview.
+
+This mechanism replaces the [http://www.haskell.org/ghc/docs/6.12.2/html/users_guide/generic-classes.html previous generic classes implementation]. What we describe until the "Kind polymorphic overhaul" section is implemented and released in GHC 7.2.1.
+
+== Status ==
+
+Use '''Keyword''' = `Generics` to ensure that a ticket ends up on this auto-generated list
+
+Open Tickets:
+[[TicketQuery(status=infoneeded,status=new|patch|infoneeded,keywords=~Generics)]]
+
+Closed Tickets:
+[[TicketQuery(status=infoneeded,status=closed,keywords=~Generics)]]
+
+
+== Main components ==
+
+ * `TcDeriv.tcDeriving` now allows deriving `Generic` instances.
+
+ * The representation types and core functionality of the library live on `GHC.Generics` (on the `ghc-prim` package).
+
+ * Many names have been added as known in `prelude/PrelNames`
+
+ * Most of the code generation is handled by `types/Generics`
+
+== Things that have been removed ==
+
+ * All of the [http://www.haskell.org/ghc/docs/6.12.2/html/users_guide/generic-classes.html generic classes stuff]. In particular, the following have been removed:
+   * `hasGenerics` field from `TyCon`;
+   * `HsNumTy` constructor from `HsType`;
+   * `TypePat` constructor from `Pat`.
+
+ * The `-XGenerics` flag is now deprecated.
+
+== What already works ==
+
+ * `Generic` and `Generic1` instances can be derived when `-XDeriveGeneric` is enabled.
+
+ * The `default` keyword can used for generic default method signatures when `-XDefaultSignatures` is enabled.
+
+ * Generic defaults are properly instantiated when giving an instance without defining the generic default method.
+
+ * Base types like `[]`, `Maybe`, tuples, come with Generic instances.
+
+== Testing ==
+
+ * Tests are available under the `generics` directory of the testsuite.
+
+= Kind polymorphic overhaul =
+
+With the new `-XPolyKinds` functionality we can make the support for generic programming better typed. The basic idea is to define the universe codes (`M1`, `:+:`, etc.) as constructors of a datatype. Promotion then lifts these constructors to types, which we can use as before, only that now we have them all classified under a new kind. The overhaul of the main module is explained below; for easier comparison with the current approach, names are kept the same whenever possible.
+
+== Generic representation universe ==
+`m` is the only real parameter here. `f` and `x` are there because we
+can't write kinds directly, since `Universe` is also a datatype (even if
+we're only interested in its promoted version). So we pass `f` and `x`
+only to set them to `* -> *` and `*`, respectively, in `Interprt`.
+`m` is different: it stands for the kind of metadata representation types,
+and we really want to be polymorphic over that, since each user datatype
+will introduce a new metadata kind.
+{{{
+data Universe f x m = 
+  -- Void (used for datatypes without constructors)
+    VV
+    
+  -- Unit
+  | UU
+  
+  -- The parameter
+  | PAR
+  
+  -- Recursion into a type of kind * -> *
+  | REC f
+  
+  -- Constants (either other parameters or recursion into types of kind *)
+  | KK Constant x
+  
+  -- Metadata
+  | MM MetaData m (Universe f x m)
+  
+  -- Sum, product, composition
+  | Universe f x m :++: Universe f x m
+  | Universe f x m :**: Universe f x m
+  | f :..: Universe f x m
+  -- Note that we always compose a concrete type on the left (like []) with
+  -- a generic representation on the right
+
+infixr 5 :++:
+infixr 6 :**:
+infixr 6 :*:
+infixr 7 :..:
+
+-- Some shortcuts
+data MetaData = CC | DD | SS
+data Constant = PP | RR
+
+data ConstantV (c :: Constant) where
+  P :: ConstantV PP
+  R :: ConstantV RR
+  
+data MetaDataV (m :: MetaData) where
+  C :: MetaDataV CC
+  D :: MetaDataV DD
+  S :: MetaDataV SS
+}}}
+
+== Universe interpretation ==
+
+As promised, we set `f` to `* -> *` and `x` to `*`.
+Unfortunately we don't have [GhcKinds#Explicitkindvariables explicit kind variable annotations]
+yet, so we cannot leave `m` polymorphic! So this code doesn't compile:
+{{{
+data Interprt :: Universe (* -> *) * m -> * -> * where
+
+  -- No interpretation for VV, as it shouldn't map to any value
+  
+  -- Unit
+  U1     :: Interprt UU p
+  
+  -- The parameter
+  Par1   :: p -> Interprt PAR p
+  
+  -- Recursion into a type of kind * -> *
+  Rec1   :: r p -> Interprt (REC r) p
+  
+  -- Constants
+  K1     :: x -> Interprt (KK c x) p
+  -- Constants shortcuts
+  Par0   :: x -> Interprt (KK PP x) p
+  Rec0   :: x -> Interprt (KK RR x) p
+  
+  -- Metadata
+  M1     :: Interprt x p -> Interprt (MM m c x) p
+  -- Metadata shortcuts
+  D1     :: Interprt x p -> Interprt (MM DD c x) p
+  C1     :: Interprt x p -> Interprt (MM CC c x) p
+  S1     :: Interprt x p -> Interprt (MM SS c x) p
+  
+  -- Sum, product, and composition
+  L1     :: Interprt a r -> Interprt (a :++: b) r
+  R1     :: Interprt b r -> Interprt (a :++: b) r
+  (:*:)  :: Interprt a r -> Interprt b r -> Interprt (a :**: b) r
+  Comp1  :: f (Interprt g r) -> Interprt (f :..: g) r
+}}}
+
+=== Names ===
+
+As an aside, note that we have to come up with names like `UU` and `KK` for the `Universe`
+even though we really just wanted to use `U1` and `K1`, like before. Then we would have
+a type and a constructor with the same name, but that's ok. However, `Universe` defines
+both a type (with constructors) and a kind (with types). So if we were to use `U1` in the
+`Universe` constructors, then we could no longer use that name in the `Interprt`
+constructors. It's a bit annoying, because we are never really interested in the type
+`Universe` and its constructors: we're only interested in its promoted variant.
+This is a slight annoyance of automatic promotion: when you define a "singleton type"
+(like our GADT `Interprt` for `Universe`) you cannot reuse the constructor names.
+
+
+== Metadata representation ==
+{{{
+data Proxy d = Proxy -- kind polymorphic
+
+-- Meta data classes
+class Datatype d where -- kind polymorphic
+  -- The name of the datatype, fully qualified
+  datatypeName :: Proxy d -> String
+}}}
+There's more of these, but they don't add any new concerns.
+
+
+== Conversion between user datatypes and generic representation ==
+
+We now get a more precise kind for `Rep`:
+
+{{{
+-- Representable types of kind *
+class Generic a where
+  type Rep a :: Universe (* -> *) * m
+  from :: a -> Interprt (Rep a) x
+  to   :: Interprt (Rep a) x -> a
+  
+-- Representable types of kind * -> *
+class Generic1 (f :: * -> *) where
+  type Rep1 f :: Universe (* -> *) * m
+  from1  :: f a -> Interprt (Rep1 f) a
+  to1    :: Interprt (Rep1 f) a -> f a
+}}}
+  
+== Example generic function: `fmap` (kind `* -> *`) ==
+
+User-visible class, exported:
+{{{
+class Functor (f :: * -> *) where
+  fmap :: (a -> b) -> f a -> f b
+  default fmap :: (Generic1 f, GFunctor (Rep1 f)) => (a -> b) -> f a -> f b
+  fmap f = to1 . gfmap f . from1  
+}}}
+
+Defined by the generic programmer, not exported:
+{{{
+class GFunctor (f :: Universe (* -> *) * m) where
+  gfmap :: (a -> b) -> Interprt f a -> Interprt f b
+  
+instance GFunctor UU where
+  gfmap _ U1 = U1
+  
+instance GFunctor PAR where
+  gfmap f (Par1 a) = Par1 (f a)
+
+instance GFunctor (KK i c) where
+  gfmap _ (K1 a) = K1 a
+
+instance (Functor f) => GFunctor (REC f) where
+  gfmap f (Rec1 a) = Rec1 (fmap f a)
+
+instance (GFunctor f) => GFunctor (MM m c f) where
+  gfmap f (M1 a) = M1 (gfmap f a)
+
+instance (GFunctor f, GFunctor g) => GFunctor (f :++: g) where
+  gfmap f (L1 a) = L1 (gfmap f a)
+  gfmap f (R1 a) = R1 (gfmap f a)
+
+instance (GFunctor f, GFunctor g) => GFunctor (f :**: g) where
+  gfmap f (a :*: b) = gfmap f a :*: gfmap f b
+
+instance (Functor f, GFunctor g) => GFunctor (f :..: g) where
+  gfmap f (Comp1 x) = Comp1 (fmap (gfmap f) x)
+}}}
+
+Note that previously `Functor` and `GFunctor` had exactly the same types.
+Now we can make clear what the difference between them is.
+  
+== Example generic function: `show` (kind `*`, uses metadata) ==
+
+User-visible class, exported:
+{{{
+class Show (a :: *) where
+  show :: a -> String
+  default show :: (Generic a, GShow (Rep a)) => a -> String
+  show = gshow . from
+}}}
+  
+Defined by the generic programmer, not exported:
+{{{
+class GShow (f :: Universe (* -> *) * m) where
+  gshow :: Interprt f x -> String
+  
+instance GShow UU where
+  gshow U1 = ""
+  
+instance (P.Show c) => GShow (KK i c) where
+  gshow (K1 a) = P.show a
+  
+instance (Datatype c, GShow f) => GShow (MM DD c f) where
+  gshow (M1 x) = datatypeName (Proxy :: Proxy c) ++ " " ++ gshow x
+}}}
+
+The other cases do not add any further complexity.
+  
+  
+== Example datatype encoding: lists (derived by the compiler) ==
+{{{  
+instance Generic [a] where
+  type Rep [a] = MM DD DList 
+                   (MM CC DList_Nil UU :++: 
+                    MM CC DList_Cons (KK PP a :**: KK RR [a]))
+
+  from [] = D1 (L1 (C1 U1))
+  from (h:t) = D1 (R1 (C1 (Par0 h :*: Rec0 t)))
+  to (D1 (L1 (C1 U1))) = []
+  to (D1 (R1 (C1 (Par0 h :*: Rec0 t)))) = h:t
+  
+-- Metadata
+data List_Meta = DList | DList_Nil | DList_Cons
+}}}
+
+Note that we use only one datatype; more correct would be to use 3, one for
+`DList`, another for the constructors, and yet another for the selectors
+(or maybe even n datatypes for the selectors, one for each constructor?)
+But we don't do that because `Universe` is polymorphic only over `m`, so
+a single metadata representation type. If we want a more fine-grained
+distinction then we would need more parameters in `Universe`, and also to
+split the `MM` case.
+{{{
+instance Datatype DList where datatypeName _ = "[]"
+}}}
+  
+=== Digression ===
+Even better would be to index the metadata representation types over
+the type they refer to. Something like:
+{{{
+  data family MetaTypes a -- kind polymorphic
+  data instance MetaTypes [] = DList | DList_Nil | DList_Cons
+}}}
+But now we are basically asking for promotion of data families, since we want
+to use promoted `DList`. Also, the case for `MM` in `Universe` would then
+be something like:
+{{{
+  | MM MetaData (MetaTypes m) (Universe f x m)
+}}}
+But I'm not entirely sure about this.
+
+== GHC 8.0 and later ==
+
+=== Type-level metadata encoding ===
+
+Because what we've described so far is rather backwards-incompatible, we wanted to at least try to improve the encoding of metadata, which was currently rather clunky prior to GHC 8.0 (giving rise to lots of empty, compiler-generated datatypes and respective instances). We can accomplished that by changing `M1` to keep the meta-information ''at the type level'':
+{{{
+newtype M1 i (c :: Meta) f p = M1 { unM1 :: f p }
+
+data Meta = MetaData Symbol Symbol  Bool
+          | MetaCons Symbol FixityI Bool
+          | MetaSel  Symbol SourceUnpackedness SourceStrictness DecidedStrictness
+
+data Fixity  = Prefix  | Infix  Associativity Int
+data FixityI = PrefixI | InfixI Associativity Nat
+
+data Associativity = LeftAssociative
+                   | RightAssociative
+                   | NotAssociative
+
+data SourceUnpackedness = NoSourceUnpackedness
+                        | SourceNoUnpack
+                        | SourceUnpack
+
+data SourceStrictness = NoSourceStrictness
+                      | SourceLazy
+                      | SourceStrict
+
+data DecidedStrictness = DecidedLazy
+                       | DecidedStrict
+                       | DecidedUnpack
+}}}
+
+Why did we need to add `FixityI`? Because `Fixity` does not promote. Yet, we wanted to expose `Fixity` to the user, not `FixityI`. Note that the meta-data classes remained mostly unchanged (aside from some enhancements to [https://ghc.haskell.org/trac/ghc/ticket/10030 Datatype] and [https://ghc.haskell.org/trac/ghc/ticket/10716 Selector]):
+{{{
+class Datatype d where
+  datatypeName :: t d (f :: * -> *) a -> [Char]
+  moduleName   :: t d (f :: * -> *) a -> [Char]
+  packageName  :: t d (f :: * -> *) a -> [Char]
+  isNewtype    :: t d (f :: * -> *) a -> Bool
+
+class Constructor c where
+  conName     :: t c (f :: * -> *) a -> [Char]
+  conFixity   :: t c (f :: * -> *) a -> Fixity
+  conIsRecord :: t c (f :: * -> *) a -> Bool
+
+class Selector s where
+  selName               :: t s (f :: * -> *) a -> [Char]
+  selSourceUnpackedness :: t s (f :: * -> *) a -> SourceUnpackedness
+  selSourceStrictness   :: t s (f :: * -> *) a -> SourceStrictness
+  selDecidedStrictness  :: t s (f :: * -> *) a -> DecidedStrictness
+}}}
+
+But now, using the magic of singletons, we give ''one single instance'' for each of these classes, instead of having to instantiate them each time a user derives `Generic`:
+{{{
+instance (KnownSymbol n, KnownSymbol m, KnownSymbol p, SingI nt)
+    => Datatype ('MetaData n m p nt) where
+  datatypeName _ = symbolVal (Proxy :: Proxy n)
+  moduleName   _ = symbolVal (Proxy :: Proxy m)
+  packageName  _ = symbolVal (Proxy :: Proxy p)
+  isNewtype    _ = fromSing  (sing  :: Sing nt)
+
+instance (KnownSymbol n, SingI f, SingI r)
+    => Constructor ('MetaCons n f r) where
+  conName     _ = symbolVal (Proxy :: Proxy n)
+  conFixity   _ = fromSing  (sing  :: Sing f)
+  conIsRecord _ = fromSing  (sing  :: Sing r)
+
+instance (SingI mn, SingI su, SingI ss, SingI ds)
+    => Selector ('MetaSel mn su ss ds) where
+  selName               _ = fromMaybe "" (fromSing (sing :: Sing mn))
+  selSourceUnpackedness _ = fromSing (sing :: Sing su)
+  selSourceStrictness   _ = fromSing (sing :: Sing ss)
+  selDecidedStrictness  _ = fromSing (sing :: Sing ds)
+}}}
+
+Naturally, we require singletons for `Bool`, `Maybe`, `FixityI`, `Associativity`, `SourceUnpackedness`, `SourceStrictness`, and `DecidedStrictness`, but that is one time boilerplate code, and is not visible for the user. (In particular, this is where we encode that the demotion of (the kind) `FixityI` is (the type) `Fixity`.)
+
+I believe this change is almost fully backwards-compatible, and lets us simplify the code for `deriving Generic` in GHC. Furthermore, I suspect it will be useful to writers of generic functions, who can now match at the type-level on things such as whether a constructor is a record or not.
+
+I say "almost fully backwards-compatible" because handwritten `Generic` instances might break with this change. But we've never recommended doing this, and I think users who do this are more than aware that they shouldn't rely on it working across different versions of GHC.
+
+==== Example ====
+
+Before GHC 8.0, the following declaration:
+
+{{{#!hs
+data Example = Example deriving Generic1
+}}}
+
+Would have generated all of this:
+
+{{{#!hs
+instance Generic Example where
+  type Rep Example = D1 D1Example (C1 C1_0Example (S1 NoSelector U1))
+  ...
+
+data D1Example
+data C1_0Example
+
+instance Datatype D1Example where
+  datatypeName _ = "Example"
+  moduleName   _ = "Module"
+  isNewtype    _ = False
+
+instance Constructor C1_0Example where
+  conName     _ = "Example"
+  conFixity   _ = Prefix
+  conIsRecord _ = False
+}}}
+
+But on GHC 8.0 and later, this is all that is generated (assuming it was compiled with no strictness optimizations):
+
+{{{#!hs
+instance Generic Example where
+  type Rep Example =
+    D1 ('MetaData "Example" "Module" "package" 'False)
+      (C1 ('MetaCons "Example" 'PrefixI 'False)
+        (S1 ('MetaSel 'Nothing 'NoSourceUnpackedness 'NoSourceStrictness 'DecidedLazy)
+          U1))
+  ...
+}}}
+
+Not bad!
+
+=== Strictness ===
+
+The `Selector` class now looks like this:
+
+{{{#!hs
+class Selector s where
+  selName               :: t s (f :: * -> *) a -> [Char]
+  selSourceUnpackedness :: t s (f :: * -> *) a -> SourceUnpackedness
+  selSourceStrictness   :: t s (f :: * -> *) a -> SourceStrictness
+  selDecidedStrictness  :: t s (f :: * -> *) a -> DecidedStrictness
+
+data SourceUnpackedness = NoSourceUnpackedness
+                        | SourceNoUnpack
+                        | SourceUnpack
+
+data SourceStrictness = NoSourceStrictness
+                      | SourceLazy
+                      | SourceStrict
+
+data DecidedStrictness = DecidedLazy
+                       | DecidedStrict
+                       | DecidedUnpack
+}}}
+
+This design draws much inspiration from the way Template Haskell handles strictness as of GHC 8.0 (see [https://ghc.haskell.org/trac/ghc/ticket/10697 here] for what motivated the change). We make a distinction between the ''source'' strictness annotations and the strictness GHC actually ''decides'' during compilation. To illustrate the difference, consider the following data type:
+
+{{{#!hs
+data T = T {-# UNPACK #-} !Int
+                          !Int
+                           Int
+  deriving Generic
+}}}
+
+If we were to encode the source unpackedness and strictness of each of `T`'s fields, they were be `SourceUnpack`/`SourceStrict`, `NoSourceUnpackedness`/`SourceStrict`, and `NoSourceUnpackedness`/`NoSourceStrictness`, no matter what. Source unpackedness/strictness is a purely syntactic property.
+
+The strictness that the user writes, however, may be different from the strictness that GHC decides during compilation. For instance, if we were to compile `T` with no optimizations, the decided strictness of each field would be `DecidedStrict`, `DecidedStrict`, and `DecidedLazy`. If we enabled `-O2`, however, they would be `DecidedUnpack`, `DecidedStrict`, and `DecidedLazy`.
+
+Things become even more interesting when `-XStrict` and `-O2` are enabled. Then the strictness that GHC would decided is `DecidedUnpack`, `DecidedStrict`, and `DecidedStrict`. And if you enable `-XStrict`, `-O2`, ''and'' `-funbox-strict-fields`, then the decided strictness is `DecidedUnpack`, `DecidedUnpack`, and `DecidedUnpack`.
+
+The variety of possible `DecidedStrictness` combinations demonstrates that strictness is more just annotation
