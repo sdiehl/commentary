@@ -28,8 +28,12 @@ Monads
 ------
 
 * GHC
+* P
 * Hsc
-* TcM
+* TcRn
+* DsM
+* SimplM
+* MonadUnique
 
 Session
 ---------
