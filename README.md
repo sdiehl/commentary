@@ -8,10 +8,10 @@ Table of Contents
   - [Simplifier](Core2CorePipeline.wiki)
   - [Backends](Backends.wiki)
     - [NCG](NCG.wiki)
-  - [GeneratedCode](GeneratedCode.wiki)
+  - [Generated Code](GeneratedCode.wiki)
 
-* [Key Data Typess](KeyDataTypes.wiki)
-  - [Source Langauge](HsSynType.wiki)
+* [Key Data Types](KeyDataTypes.wiki)
+  - [Source Language](HsSynType.wiki)
   - [Source Names](RdrNameType.wiki)
   - [Module Types](ModueTypes.wiki)
   - [Name Types](NameType.wiki)
@@ -21,8 +21,8 @@ Table of Contents
     - [Kinds](Kinds.wiki)
     - [Equality types and coercions](FC.wiki)
   - [Core](CoreSynType.wiki)
-  - [sTG](StgSynType.wiki)
-  - [Cmm](CmmType.wiki)
+  - [STG](StgSynType.wiki)
+  - [CMM](CmmType.wiki)
 
 Monads
 ------
@@ -45,7 +45,7 @@ Session
 * Target
 * TargetId
 * HscTarget
-* GhcMod
+* GhcMode
 * ModSummary
 * InteractiveContext
 * TypeEnv
